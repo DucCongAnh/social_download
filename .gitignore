@@ -1,0 +1,74 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+
+# === Virtual Environments ===
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# === Flask / Instance Config ===
+instance/
+*.db
+*.sqlite3
+*.sqlite
+config.py
+config.json
+*.env
+.env
+*.pem
+
+# === Logs ===
+*.log
+logs/
+*.pid
+
+# === IDE / Editor Files ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# === OS Files ===
+.DS_Store
+Thumbs.db
+
+# === Testing ===
+.coverage
+.tox/
+nosetests.xml
+coverage.xml
+htmlcov/
+
+# === Build / Distribution ===
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# === PyInstaller ===
+*.spec
+
+# === Byte-compiled / C extensions ===
+*.so
+
+# === Local Files ===
+# Optional: ignore any local-only data folders
+data/
+uploads/
+media/
+
+# === Docker (if using) ===
+*.pid
+*.tar
+.dockerignore
+
+# === Misc ===
+# You can ignore project-specific secrets or temporary files
+secret_key.txt

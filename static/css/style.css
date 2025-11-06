@@ -1,0 +1,33 @@
+body {
+    background: linear-gradient(135deg, #89f7fe, #66a6ff);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.card {
+    border: none;
+    border-radius: 16px;
+    background: #fff;
+}
+
+#downloadBtn {
+    font-weight: bold;
+    letter-spacing: 0.3px;
+    transition: all 0.3s ease;
+}
+
+#downloadBtn:hover {
+    transform: scale(1.03);
+    background-color: #0d6efd;
+    color: #fff;
+}
+
+#status {
+    transition: all 0.4s ease;
+}
+
+footer {
+    margin-top: auto;
+    padding: 20px 0;
+}
