@@ -1,36 +1,91 @@
 from flask import Flask, render_template, request, jsonify, send_file, Response
-import os, yt_dlp, tempfile, re, json, time, threading
+import json
+import os
+import re
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from urllib.parse import urlparse
+
+import yt_dlp
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
-# Biến toàn cục lưu tiến độ
-progress_data = {"progress": 0, "status": "idle"}
+# Lưu trạng thái tải theo từng download_id để tránh ghi đè giữa các người dùng
+downloads_lock = threading.Lock()
+downloads = {}
+
+
+def init_download(download_id, tmp_dir):
+    with downloads_lock:
+        downloads[download_id] = {
+            "progress": 0.0,
+            "status": "starting",
+            "filename": None,
+            "file_path": None,
+            "message": None,
+            "tmp_dir": tmp_dir,
+        }
+
+
+def update_download(download_id, **kwargs):
+    with downloads_lock:
+        if download_id in downloads:
+            downloads[download_id].update(kwargs)
+
+
+def get_download(download_id):
+    with downloads_lock:
+        entry = downloads.get(download_id)
+        return entry.copy() if entry else None
+
+
+def cleanup_download(download_id, delay=30):
+    """Dọn dẹp thư mục tạm sau khi đã gửi file cho client."""
+
+    def _cleanup():
+        time.sleep(delay)
+        with downloads_lock:
+            entry = downloads.pop(download_id, None)
+        if entry:
+            tmp_dir = entry.get("tmp_dir")
+            if tmp_dir and os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    threading.Thread(target=_cleanup, daemon=True).start()
+
+
+def is_valid_url(url):
+    """Kiểm tra URL hợp lệ."""
+    try:
+        result = urlparse(url)
+        return all([result.scheme in ("http", "https"), result.netloc])
+    except ValueError:
+        return False
 
 
 def sanitize_filename(name):
-    """Xóa ký tự không hợp lệ trên Windows"""
-    return re.sub(r'[\\/*?:"<>|׃]', '_', name).strip()
+    """Loại bỏ ký tự không hợp lệ khi tạo tên file."""
+    return re.sub(r'[\\/*?:"<>|]', '_', name).strip()
 
 
-def download_video(url, tmp_dir):
-    """Hàm tải video chạy trong luồng riêng"""
-    global progress_data
-    progress_data = {"progress": 0, "status": "starting"}
+def download_video(download_id, url, tmp_dir):
+    """Tải video trong luồng riêng cho từng download_id."""
+    update_download(download_id, progress=0.0, status="starting")
 
     def progress_hook(d):
-        global progress_data
         if d["status"] == "downloading":
             raw_percent = d.get("_percent_str", "0.0%")
-            # Loại bỏ mã màu ANSI như \x1b[0;94m
             clean_percent = re.sub(r"\x1b\[[0-9;]*m", "", raw_percent)
             try:
                 percent = float(clean_percent.strip().replace("%", ""))
             except ValueError:
                 percent = 0.0
-            progress_data = {"progress": percent, "status": "downloading"}
-
+            update_download(download_id, progress=percent, status="downloading")
         elif d["status"] == "finished":
-            progress_data = {"progress": 100.0, "status": "processing"}
+            update_download(download_id, progress=100.0, status="processing")
 
     try:
         ydl_opts = {
@@ -38,34 +93,40 @@ def download_video(url, tmp_dir):
             "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
             "progress_hooks": [progress_hook],
             "quiet": True,
-            "no_color": True,  # ✅ Tắt mã màu để tránh lỗi float
+            "no_color": True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get("title", "video")
             ext = info.get("ext", "mp4")
+            downloaded_file = info.get("_filename")
 
-        # Làm sạch tên file
-        safe_title = sanitize_filename(title)
+        safe_title = sanitize_filename(title) or "video"
         filename = f"{safe_title}.{ext}"
         file_path = os.path.join(tmp_dir, filename)
 
-        # Rename file thực tế (vì yt_dlp đôi khi tạo tên không sạch)
-        for f in os.listdir(tmp_dir):
-            if f.endswith(ext):
-                os.rename(os.path.join(tmp_dir, f), file_path)
-                break
+        source_file = downloaded_file if downloaded_file and os.path.exists(downloaded_file) else None
+        if not source_file:
+            for entry in os.listdir(tmp_dir):
+                if entry.endswith(ext):
+                    source_file = os.path.join(tmp_dir, entry)
+                    break
+        if source_file and source_file != file_path:
+            os.rename(source_file, file_path)
+        elif not source_file:
+            raise FileNotFoundError("Không tìm thấy file đã tải xuống")
 
-        progress_data = {
-            "progress": 100.0,
-            "status": "done",
-            "file_path": file_path,
-            "filename": filename,
-        }
+        update_download(
+            download_id,
+            progress=100.0,
+            status="done",
+            file_path=file_path,
+            filename=filename,
+        )
 
-    except Exception as e:
-        progress_data = {"progress": 0, "status": "error", "message": str(e)}
+    except Exception as exc:
+        update_download(download_id, progress=0.0, status="error", message=str(exc))
 
 
 @app.route("/")
@@ -73,56 +134,124 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/get_info", methods=["POST"])
+def get_video_info():
+    data = request.get_json()
+    url = data.get("url") if data else None
+    if not url or not is_valid_url(url):
+        return jsonify({"status": "error", "message": "Link không hợp lệ!"}), 400
+
+    if "youtube.com/watch" in url:
+        url = url.split("&")[0]
+
+    try:
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        thumbnail = info.get("thumbnail", "")
+        if not thumbnail and info.get("thumbnails"):
+            thumbnail = info["thumbnails"][-1]["url"]
+
+        return jsonify(
+            {
+                "status": "success",
+                "title": info.get("title", "Video"),
+                "thumbnail": thumbnail,
+                "duration": info.get("duration", 0),
+                "uploader": info.get("uploader", "Unknown"),
+            }
+        )
+    except Exception as exc:
+        error_text = str(exc)
+        if "Unsupported URL" in error_text:
+            user_message = "Link này không được hỗ trợ. Hãy nhập link video!"
+        elif "HTTP Error 403" in error_text:
+            user_message = "Máy chủ chặn truy cập. Có thể video riêng tư hoặc bị giới hạn vùng."
+        elif "Video unavailable" in error_text:
+            user_message = "Video không tồn tại hoặc đã bị xóa."
+        else:
+            user_message = "Đã xảy ra lỗi. Vui lòng thử lại sau."
+        return jsonify({"status": "error", "message": user_message}), 400
+
+
 @app.route("/api/download", methods=["POST"])
 def start_download():
     data = request.get_json()
-    url = data.get("url")
+    url = data.get("url") if data else None
+    if not url or not is_valid_url(url):
+        return jsonify({"status": "error", "message": "Link không hợp lệ!"}), 400
 
-    # ✅ Chỉ giữ phần trước dấu & để tránh tải cả playlist
-    if url and "youtube.com/watch" in url:
+    if "youtube.com/watch" in url:
         url = url.split("&")[0]
 
-
-    if not url:
-        return jsonify({"status": "error", "message": "URL không hợp lệ"}), 400
-
     tmp_dir = tempfile.mkdtemp()
-    thread = threading.Thread(target=download_video, args=(url, tmp_dir))
+    download_id = uuid.uuid4().hex
+    init_download(download_id, tmp_dir)
+
+    thread = threading.Thread(target=download_video, args=(download_id, url, tmp_dir), daemon=True)
     thread.start()
 
-    return jsonify({"status": "started"})
+    return jsonify({"status": "started", "download_id": download_id})
 
 
-@app.route("/api/progress")
-def progress_stream():
-    """Luồng SSE cập nhật tiến trình"""
+@app.route("/api/progress/<download_id>")
+def progress_stream(download_id):
+    if not get_download(download_id):
+        return jsonify({"status": "error", "message": "Download ID không hợp lệ"}), 404
+
     def generate():
-        last_value = -1
+        last_payload = None
         while True:
-            if progress_data["status"] in ["done", "error"]:
-                yield f"data: {json.dumps(progress_data)}\n\n"
+            entry = get_download(download_id)
+            if not entry:
+                yield f'data: {json.dumps({"status": "error", "message": "Download ID không còn nữa"})}\n\n'
                 break
 
-            if progress_data["progress"] != last_value:
-                last_value = progress_data["progress"]
-                yield f"data: {json.dumps(progress_data)}\n\n"
+            payload = {
+                "progress": entry.get("progress", 0.0),
+                "status": entry.get("status", "idle"),
+                "message": entry.get("message"),
+                "filename": entry.get("filename"),
+            }
+
+            if payload != last_payload:
+                last_payload = payload
+                yield f"data: {json.dumps(payload)}\n\n"
+
+            if entry.get("status") in ["done", "error"]:
+                break
+
             time.sleep(0.5)
 
     return Response(generate(), mimetype="text/event-stream")
 
 
-@app.route("/api/download_file")
-def download_file():
-    """Sau khi hoàn tất, client gọi route này để lấy file"""
-    if progress_data.get("status") != "done":
+@app.route("/api/download_file/<download_id>")
+def download_file(download_id):
+    entry = get_download(download_id)
+    if not entry or entry.get("status") != "done":
         return jsonify({"status": "error", "message": "File chưa sẵn sàng"}), 400
 
-    return send_file(
-        progress_data["file_path"],
+    file_path = entry.get("file_path")
+    filename = entry.get("filename") or "video.mp4"
+    if not file_path or not os.path.exists(file_path):
+        return jsonify({"status": "error", "message": "File không tồn tại"}), 400
+
+    response = send_file(
+        file_path,
         as_attachment=True,
-        download_name=progress_data["filename"],
-        mimetype="video/mp4"
+        download_name=filename,
+        mimetype="video/mp4",
     )
+
+    cleanup_download(download_id)
+    return response
 
 
 if __name__ == "__main__":
