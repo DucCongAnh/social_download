@@ -71,6 +71,21 @@ def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', '_', name).strip()
 
 
+def _select_format():
+    """Return yt_dlp format string and ffmpeg location depending on availability."""
+    ffmpeg_path = shutil.which("ffmpeg") or shutil.which("avconv")
+    if ffmpeg_path:
+        return {
+            "format": "bestvideo+bestaudio/best",
+            "ffmpeg_location": os.path.dirname(ffmpeg_path),
+            "needs_ffmpeg": True,
+        }
+
+    # Fall back to progressive streams (video+audio together) so ffmpeg is not needed.
+    progressive = "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best"
+    return {"format": progressive, "ffmpeg_location": None, "needs_ffmpeg": False}
+
+
 def download_video(download_id, url, tmp_dir):
     """Tải video trong luồng riêng cho từng download_id."""
     update_download(download_id, progress=0.0, status="starting")
@@ -88,13 +103,20 @@ def download_video(download_id, url, tmp_dir):
             update_download(download_id, progress=100.0, status="processing")
 
     try:
+        format_config = _select_format()
         ydl_opts = {
-            "format": "best",
+            "format": format_config["format"],
             "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
             "progress_hooks": [progress_hook],
             "quiet": True,
             "no_color": True,
         }
+
+        if format_config["ffmpeg_location"]:
+            ydl_opts["ffmpeg_location"] = format_config["ffmpeg_location"]
+        else:
+            # Avoid post-processing steps that require ffmpeg when we only have progressive streams.
+            ydl_opts["postprocessors"] = []
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -126,7 +148,13 @@ def download_video(download_id, url, tmp_dir):
         )
 
     except Exception as exc:
-        update_download(download_id, progress=0.0, status="error", message=str(exc))
+        error_text = str(exc)
+        if "ffmpeg" in error_text.lower():
+            error_text = (
+                "May chu khong ho tro dinh dang nay do thieu FFmpeg. "
+                "Vui long chon video khac hoac thu video co chat luong thap hon."
+            )
+        update_download(download_id, progress=0.0, status="error", message=error_text)
 
 
 @app.route("/")
