@@ -152,14 +152,14 @@ elements.downloadBtn.addEventListener("click", async () => {
         return;
     }
 
-    if (isVideoDownloaded(url)) {
-        elements.downloadStatus.textContent = "Bạn đã tải video này trước đó!";
-        elements.downloadStatus.style.color = "darkorange";
-        setTimeout(() => {
-            elements.downloadStatus.textContent = "";
-        }, 3000);
-        return;
-    }
+    // if (isVideoDownloaded(url)) {
+    //     elements.downloadStatus.textContent = "Bạn đã tải video này trước đó!";
+    //     elements.downloadStatus.style.color = "darkorange";
+    //     setTimeout(() => {
+    //         elements.downloadStatus.textContent = "";
+    //     }, 3000);
+    //     return;
+    // }
 
     elements.downloadBtn.disabled = true;
     elements.downloadSpinner.classList.remove("d-none");
